@@ -12,7 +12,7 @@
 
 import { readFile, writeFile } from "fs/promises";
 import { existsSync } from "fs";
-import { join } from "path";
+import { basename, join } from "path";
 import TOML from "@iarna/toml";
 import { AGENT_DEFINITIONS } from "../agents/definitions.js";
 import { DEFAULT_FRONTIER_MODEL } from "./models.js";
@@ -23,6 +23,7 @@ import type { HudPreset } from "../hud/types.js";
 interface MergeOptions {
   includeTui?: boolean;
   modelOverride?: string;
+  projectConfigStyle?: ProjectConfigStyle;
   sharedMcpServers?: UnifiedMcpRegistryServer[];
   sharedMcpRegistrySource?: string;
   verbose?: boolean;
@@ -44,6 +45,11 @@ const OMX_TOP_LEVEL_KEYS = [
   "model_reasoning_effort",
   "developer_instructions",
 ] as const;
+export const PROJECT_CONFIG_STYLES = [
+  "absolute-path",
+  "portable-bash",
+] as const;
+export type ProjectConfigStyle = (typeof PROJECT_CONFIG_STYLES)[number];
 
 export interface ModelContextRecommendation {
   model: string;
@@ -81,6 +87,8 @@ const OMX_AGENTS_MAX_DEPTH = 2;
 const OMX_EXPLORE_ROUTING_DEFAULT = "1";
 const OMX_EXPLORE_CMD_ENV = "USE_OMX_EXPLORE_CMD";
 const DEFAULT_LAUNCHER_MCP_STARTUP_TIMEOUT_SEC = 15;
+const DEFAULT_PROJECT_CONFIG_STYLE: ProjectConfigStyle = "absolute-path";
+const PORTABLE_BASH_GLOBAL_OMX_ROOT = "$(npm root -g)/oh-my-codex";
 const STATUS_LINE_FOCUSED_FIELDS: readonly string[] = [
   "model-with-reasoning",
   "git-branch",
@@ -261,14 +269,19 @@ function getOmxTopLevelLines(
   pkgRoot: string,
   existingConfig = "",
   modelOverride?: string,
+  projectConfigStyle: ProjectConfigStyle = DEFAULT_PROJECT_CONFIG_STYLE,
 ): string[] {
   const notifyHookPath = join(pkgRoot, "dist", "scripts", "notify-hook.js");
   const escapedPath = escapeTomlString(notifyHookPath);
   const rootValues = parseRootKeyValues(existingConfig);
+  const notifyLine =
+    projectConfigStyle === "portable-bash"
+      ? `notify = ["bash", "-c", "${escapeTomlString(`node "${PORTABLE_BASH_GLOBAL_OMX_ROOT}/dist/scripts/notify-hook.js" "$1"`)}", "notify-hook"]`
+      : `notify = ["node", "${escapedPath}"]`;
 
   const lines = [
     "# oh-my-codex top-level settings (must be before any [table])",
-    `notify = ["node", "${escapedPath}"]`,
+    notifyLine,
     'model_reasoning_effort = "medium"',
     `developer_instructions = "${escapeTomlString(OMX_DEVELOPER_INSTRUCTIONS)}"`,
   ];
@@ -389,6 +402,10 @@ function stripRootLevelKeys(config: string, keys: readonly string[]): string {
     ...filteredEntries.flatMap((entry) => entry.lines),
     ...remainder,
   ];
+
+  while (result[0]?.trim() === "") {
+    result.shift();
+  }
 
   if (result.length === 0) {
     return "";
@@ -1346,6 +1363,7 @@ function getOmxTablesBlock(
   pkgRoot: string,
   includeTui = true,
   statusLinePreset: HudPreset = DEFAULT_STATUS_LINE_PRESET,
+  projectConfigStyle: ProjectConfigStyle = DEFAULT_PROJECT_CONFIG_STYLE,
 ): string {
   const lines = [
     "",
@@ -1359,12 +1377,20 @@ function getOmxTablesBlock(
     lines.push("");
     lines.push(server.title);
     lines.push(`[mcp_servers.${server.name}]`);
-    lines.push('command = "node"');
-    lines.push(
-      `args = [${server.args
-        .map((arg) => `"${escapeTomlString(arg)}"`)
-        .join(", ")}]`,
-    );
+    if (projectConfigStyle === "portable-bash") {
+      const entrypoint = basename(server.args[0] ?? "");
+      lines.push('command = "bash"');
+      lines.push(
+        `args = ["-c", "${escapeTomlString(`exec node "${PORTABLE_BASH_GLOBAL_OMX_ROOT}/dist/mcp/${entrypoint}"`)}"]`,
+      );
+    } else {
+      lines.push('command = "node"');
+      lines.push(
+        `args = [${server.args
+          .map((arg) => `"${escapeTomlString(arg)}"`)
+          .join(", ")}]`,
+      );
+    }
     lines.push(`enabled = ${server.enabled ? "true" : "false"}`);
     if (typeof server.startupTimeoutSec === "number") {
       lines.push(`startup_timeout_sec = ${server.startupTimeoutSec}`);
@@ -1448,11 +1474,13 @@ export function buildMergedConfig(
     pkgRoot,
     existing,
     options.modelOverride,
+    options.projectConfigStyle,
   );
   const tablesBlock = getOmxTablesBlock(
     pkgRoot,
     includeTui && !tuiUpsert.hadExistingTui,
     statusLinePreset,
+    options.projectConfigStyle,
   );
   const sharedRegistryBlock = getSharedMcpRegistryBlock(
     options.sharedMcpServers ?? [],

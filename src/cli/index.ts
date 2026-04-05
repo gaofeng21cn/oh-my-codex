@@ -8,7 +8,14 @@ import { basename, dirname, join } from "path";
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "fs";
 import { copyFile, cp, lstat, mkdir, readdir, rm, symlink } from "fs/promises";
 import { constants as osConstants } from "os";
-import { setup, SETUP_SCOPES, type SetupInstallMode, type SetupScope } from "./setup.js";
+import {
+  setup,
+  PROJECT_CONFIG_STYLES,
+  SETUP_SCOPES,
+  type ProjectConfigStyle,
+  type SetupInstallMode,
+  type SetupScope,
+} from "./setup.js";
 import { uninstall } from "./uninstall.js";
 import { version } from "./version.js";
 import { tmuxHookCommand } from "./tmux-hook.js";
@@ -244,6 +251,9 @@ Options:
   --verbose     Show detailed output
   --scope       Setup scope for "omx setup" only:
                 user | project
+  --project-config-style
+                Project-scope config generation for "omx setup" only:
+                absolute-path | portable-bash
 
 Launch policy:
   OMX_LAUNCH_POLICY=direct|tmux|detached-tmux|auto
@@ -440,6 +450,36 @@ export function resolveSetupScopeArg(args: string[]): SetupScope | undefined {
   }
   throw new Error(
     `Invalid setup scope: ${value}. Expected one of: ${SETUP_SCOPES.join(", ")}`,
+  );
+}
+
+export function resolveProjectConfigStyleArg(
+  args: string[],
+): ProjectConfigStyle | undefined {
+  let value: string | undefined;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--project-config-style") {
+      const next = args[index + 1];
+      if (!next || next.startsWith("-")) {
+        throw new Error(
+          `Missing project config style value after --project-config-style. Expected one of: ${PROJECT_CONFIG_STYLES.join(", ")}`,
+        );
+      }
+      value = next;
+      index += 1;
+      continue;
+    }
+    if (arg.startsWith("--project-config-style=")) {
+      value = arg.slice("--project-config-style=".length);
+    }
+  }
+  if (!value) return undefined;
+  if (PROJECT_CONFIG_STYLES.includes(value as ProjectConfigStyle)) {
+    return value as ProjectConfigStyle;
+  }
+  throw new Error(
+    `Invalid project config style: ${value}. Expected one of: ${PROJECT_CONFIG_STYLES.join(", ")}`,
   );
 }
 
@@ -971,6 +1011,7 @@ export async function main(args: string[]): Promise<void> {
           verbose: options.verbose,
           scope: resolveSetupScopeArg(args.slice(1)),
           installMode: resolveSetupInstallModeArg(args.slice(1)),
+          projectConfigStyle: resolveProjectConfigStyleArg(args.slice(1)),
         });
         break;
       case "update":

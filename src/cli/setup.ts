@@ -73,8 +73,10 @@ import { DEFAULT_HUD_CONFIG, type HudPreset } from "../hud/types.js";
 import {
 	SETUP_INSTALL_MODES,
 	SETUP_SCOPES,
+	PROJECT_CONFIG_STYLES,
 	getSetupScopeFilePath,
 	readPersistedSetupPreferences,
+	type ProjectConfigStyle,
 	type PersistedSetupScope,
 	type SetupInstallMode,
 	type SetupScope,
@@ -118,6 +120,7 @@ interface SetupOptions {
 	mergeAgents?: boolean;
 	dryRun?: boolean;
 	installMode?: SetupInstallMode;
+	projectConfigStyle?: ProjectConfigStyle;
 	scope?: SetupScope;
 	verbose?: boolean;
 	agentsOverwritePrompt?: (destinationPath: string) => Promise<boolean>;
@@ -140,8 +143,8 @@ interface SetupOptions {
 	mcpRegistryCandidates?: string[];
 }
 
-export { SETUP_INSTALL_MODES, SETUP_SCOPES };
-export type { SetupInstallMode, SetupScope };
+export { PROJECT_CONFIG_STYLES, SETUP_INSTALL_MODES, SETUP_SCOPES };
+export type { ProjectConfigStyle, SetupInstallMode, SetupScope };
 
 export interface ScopeDirectories {
 	codexConfigFile: string;
@@ -241,6 +244,11 @@ interface ResolvedSetupInstallMode {
 	source: "cli" | "persisted" | "prompt" | "default";
 }
 
+interface ResolvedProjectConfigStyle {
+	projectConfigStyle: ProjectConfigStyle;
+	source: "cli" | "persisted" | "default";
+}
+
 type PersistedSetupReviewDecision = "keep" | "review" | "reset";
 
 const REQUIRED_TEAM_CLI_API_MARKERS = [
@@ -251,6 +259,7 @@ const REQUIRED_TEAM_CLI_API_MARKERS = [
 
 const DEFAULT_SETUP_SCOPE: SetupScope = "user";
 const DEFAULT_SETUP_INSTALL_MODE: SetupInstallMode = "legacy";
+const DEFAULT_PROJECT_CONFIG_STYLE: ProjectConfigStyle = "absolute-path";
 const LEGACY_SETUP_MODEL = "gpt-5.3-codex";
 const DEFAULT_SETUP_MODEL = DEFAULT_FRONTIER_MODEL;
 const OBSOLETE_NATIVE_AGENT_FIELD = ["skill", "ref"].join("_");
@@ -909,6 +918,35 @@ async function resolveSetupInstallMode(
 	return { installMode: defaultMode, source: "default" };
 }
 
+async function resolveProjectConfigStyle(
+	projectRoot: string,
+	scope: SetupScope,
+	requestedProjectConfigStyle?: ProjectConfigStyle,
+	persistedReviewDecision: PersistedSetupReviewDecision = "keep",
+	persistedPreferences?: Partial<PersistedSetupScope>,
+): Promise<ResolvedProjectConfigStyle> {
+	if (requestedProjectConfigStyle) {
+		return { projectConfigStyle: requestedProjectConfigStyle, source: "cli" };
+	}
+	const persisted =
+		persistedPreferences ?? (await readPersistedSetupPreferences(projectRoot));
+	if (
+		scope === "project" &&
+		persisted?.projectConfigStyle &&
+		persistedReviewDecision === "keep" &&
+		persisted.scope === scope
+	) {
+		return {
+			projectConfigStyle: persisted.projectConfigStyle,
+			source: "persisted",
+		};
+	}
+	return {
+		projectConfigStyle: DEFAULT_PROJECT_CONFIG_STYLE,
+		source: "default",
+	};
+}
+
 function hasGitignoreEntry(content: string, entry: string): boolean {
 	return content
 		.split(/\r?\n/)
@@ -1445,6 +1483,7 @@ export async function setup(options: SetupOptions = {}): Promise<void> {
 		force = false,
 		dryRun = false,
 		installMode: requestedInstallMode,
+		projectConfigStyle: requestedProjectConfigStyle,
 		scope: requestedScope,
 		verbose = false,
 		setupScopePrompt,
@@ -1471,9 +1510,16 @@ export async function setup(options: SetupOptions = {}): Promise<void> {
 		Boolean(persistedPreferences?.installMode) &&
 		(!persistedPreferences?.scope ||
 			persistedPreferences.scope === effectiveScopeForInstallMode);
+	const wouldUsePersistedProjectConfigStyle =
+		!requestedProjectConfigStyle &&
+		Boolean(persistedPreferences?.projectConfigStyle) &&
+		persistedPreferences?.scope === "project" &&
+		effectiveScopeForInstallMode === "project";
 	const shouldReviewPersistedSetup =
 		hasPersistedSetupPreferences(persistedPreferences) &&
-		(wouldUsePersistedScope || wouldUsePersistedInstallMode) &&
+		(wouldUsePersistedScope ||
+			wouldUsePersistedInstallMode ||
+			wouldUsePersistedProjectConfigStyle) &&
 		(typeof persistedSetupReviewPrompt === "function" ||
 			(process.stdin.isTTY && process.stdout.isTTY));
 	if (shouldReviewPersistedSetup) {
@@ -1496,6 +1542,13 @@ export async function setup(options: SetupOptions = {}): Promise<void> {
 		resolvedScope.scope,
 		requestedInstallMode,
 		installModePrompt,
+		persistedReviewDecision,
+		persistedPreferences,
+	);
+	const resolvedProjectConfigStyle = await resolveProjectConfigStyle(
+		projectRoot,
+		resolvedScope.scope,
+		requestedProjectConfigStyle,
 		persistedReviewDecision,
 		persistedPreferences,
 	);
@@ -1535,6 +1588,20 @@ export async function setup(options: SetupOptions = {}): Promise<void> {
 			`Using setup install mode: ${resolvedInstallMode.installMode}${installModeSourceMessage}\n`,
 		);
 	}
+	if (resolvedScope.scope === "project") {
+		const projectConfigStyleSourceMessage =
+			resolvedProjectConfigStyle.source === "persisted"
+				? " (from .omx/setup-scope.json)"
+				: "";
+		console.log(
+			`Using project config style: ${resolvedProjectConfigStyle.projectConfigStyle}${projectConfigStyleSourceMessage}\n`,
+		);
+	}
+	const shouldPersistProjectConfigStyle =
+		resolvedScope.scope === "project" &&
+		(resolvedProjectConfigStyle.projectConfigStyle !==
+			DEFAULT_PROJECT_CONFIG_STYLE ||
+			persistedPreferences?.projectConfigStyle !== undefined);
 
 	// Step 1: Ensure directories exist
 	console.log("[1/8] Creating directories...");
@@ -1567,9 +1634,21 @@ export async function setup(options: SetupOptions = {}): Promise<void> {
 			? {
 					scope: resolvedScope.scope,
 					installMode: resolvedInstallMode.installMode,
+					...(shouldPersistProjectConfigStyle
+						? {
+								projectConfigStyle:
+									resolvedProjectConfigStyle.projectConfigStyle,
+							}
+						: {}),
 				}
 			: {
 					scope: resolvedScope.scope,
+					...(shouldPersistProjectConfigStyle
+						? {
+								projectConfigStyle:
+									resolvedProjectConfigStyle.projectConfigStyle,
+							}
+						: {}),
 				};
 	await persistSetupPreferences(projectRoot, setupPreferencesToPersist, {
 		dryRun,
@@ -1849,6 +1928,7 @@ export async function setup(options: SetupOptions = {}): Promise<void> {
 			{
 				dryRun,
 				modelUpgradePrompt,
+				projectConfigStyle: resolvedProjectConfigStyle.projectConfigStyle,
 				verbose,
 				statusLinePreset,
 				forceStatusLinePreset: force,
@@ -2919,7 +2999,10 @@ async function updateManagedConfig(
 	sharedMcpRegistry: UnifiedMcpRegistryLoadResult,
 	summary: SetupCategorySummary,
 	backupContext: SetupBackupContext,
-	options: Pick<SetupOptions, "dryRun" | "verbose" | "modelUpgradePrompt"> & {
+	options: Pick<
+		SetupOptions,
+		"dryRun" | "verbose" | "modelUpgradePrompt" | "projectConfigStyle"
+	> & {
 		statusLinePreset?: HudPreset;
 		forceStatusLinePreset?: boolean;
 	},
@@ -2949,6 +3032,7 @@ async function updateManagedConfig(
 	const finalConfig = buildMergedConfig(existing, pkgRoot, {
 		includeTui: omxManagesTui,
 		modelOverride,
+		projectConfigStyle: options.projectConfigStyle,
 		sharedMcpServers: sharedMcpRegistry.servers,
 		sharedMcpRegistrySource: sharedMcpRegistry.sourcePath,
 		verbose: options.verbose,

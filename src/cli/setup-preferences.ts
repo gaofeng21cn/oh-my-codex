@@ -8,9 +8,16 @@ export type SetupScope = (typeof SETUP_SCOPES)[number];
 export const SETUP_INSTALL_MODES = ["legacy", "plugin"] as const;
 export type SetupInstallMode = (typeof SETUP_INSTALL_MODES)[number];
 
+export const PROJECT_CONFIG_STYLES = [
+	"absolute-path",
+	"portable-bash",
+] as const;
+export type ProjectConfigStyle = (typeof PROJECT_CONFIG_STYLES)[number];
+
 export interface PersistedSetupScope {
 	scope: SetupScope;
 	installMode?: SetupInstallMode;
+	projectConfigStyle?: ProjectConfigStyle;
 }
 
 export type PartialPersistedSetupScope = Partial<PersistedSetupScope>;
@@ -27,6 +34,10 @@ export function isSetupInstallMode(value: string): value is SetupInstallMode {
 	return SETUP_INSTALL_MODES.includes(value as SetupInstallMode);
 }
 
+export function isProjectConfigStyle(value: string): value is ProjectConfigStyle {
+	return PROJECT_CONFIG_STYLES.includes(value as ProjectConfigStyle);
+}
+
 export function getSetupScopeFilePath(projectRoot: string): string {
 	return join(projectRoot, ".omx", "setup-scope.json");
 }
@@ -38,6 +49,7 @@ function parsePersistedSetupPreferences(
 	const parsed = JSON.parse(raw) as Partial<{
 		scope: unknown;
 		installMode: unknown;
+		projectConfigStyle: unknown;
 	}>;
 	const persisted: PartialPersistedSetupScope = {};
 
@@ -57,6 +69,13 @@ function parsePersistedSetupPreferences(
 		isSetupInstallMode(parsed.installMode)
 	) {
 		persisted.installMode = parsed.installMode;
+	}
+
+	if (
+		typeof parsed.projectConfigStyle === "string" &&
+		isProjectConfigStyle(parsed.projectConfigStyle)
+	) {
+		persisted.projectConfigStyle = parsed.projectConfigStyle;
 	}
 
 	return Object.keys(persisted).length > 0 ? persisted : undefined;
